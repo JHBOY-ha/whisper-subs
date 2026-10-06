@@ -375,11 +375,64 @@ namespace WhisperSubs.Controller
         /// is <see cref="PriorityCount"/>. (v4.0.)
         /// </summary>
         [ExcludeFromCodeCoverage(Justification = "Reads BaseItem.Name off queued items; the lane ordering it projects is unit-tested in PriorityLanesTests")]
-        public IReadOnlyList<(string Name, PriorityTier Tier, string Language, string? Target)> PendingItems(int max = 200)
+        public IReadOnlyList<(string Name, PriorityTier Tier, string Language, string? Target, string Key)> PendingItems(int max = 200)
             => _lanes.Snapshot()
                      .Take(max < 0 ? 0 : max)
-                     .Select(e => (e.Value.Item.Name, (PriorityTier)e.Tier, e.Value.Language, e.Value.Target))
+                     .Select(e => (e.Value.Item.Name, (PriorityTier)e.Tier, e.Value.Language, e.Value.Target, e.Key))
                      .ToList();
+
+        /// <summary>
+        /// Cancels waiting jobs only. A null key selects all currently waiting jobs. Serialize the new
+        /// snapshot BEFORE removing anything in memory, under the dispatch lock, so a failed save leaves
+        /// the queue intact and a racing dequeue cannot turn a waiting cancellation into a running one.
+        /// Existing subtitles and in-flight leases are never changed.
+        /// </summary>
+        public int CancelPending(string? key = null) => CancelPending(key, SaveCancellation);
+
+        internal int CancelPending(string? key, System.Action<List<QueueEntry>, List<QueueEntry>> save)
+        {
+            lock (_dispatchGate)
+            {
+                var snapshot = _lanes.Snapshot();
+                var selected = snapshot.Where(e => key == null || e.Key == key).ToList();
+                if (selected.Count == 0) return 0;
+                var pending = snapshot.Where(e => key != null && e.Key != key)
+                    .Select(e => ToEntry(e.Value, e.Tier)).ToList();
+                var running = _inFlight.Values.Where(w => w != null)
+                    .Select(w => ToEntry(w!, (int)w!.Tier)).ToList();
+                save(pending, running); // Must propagate failures; never acknowledge a non-durable cancel.
+                foreach (var entry in selected)
+                {
+                    _lanes.Remove(entry.Key);
+                    entry.Value.Completion?.TrySetCanceled();
+                }
+                return selected.Count;
+            }
+        }
+
+        private void SaveCancellation(List<QueueEntry> pending, List<QueueEntry> running)
+        {
+            var path = QueueFilePath;
+            if (string.IsNullOrEmpty(path)) throw new IOException("Queue storage is unavailable.");
+            lock (_fileLock)
+            {
+                var temp = path + "." + System.Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    var bytes = Encoding.UTF8.GetBytes(SerializeQueueFile(pending, running));
+                    using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        stream.Write(bytes);
+                        stream.Flush(flushToDisk: true);
+                    }
+                    File.Move(temp, path, overwrite: true);
+                }
+                finally
+                {
+                    try { if (File.Exists(temp)) File.Delete(temp); } catch { /* preserve original error */ }
+                }
+            }
+        }
 
         // ── Per-file progress (updated by WhisperProvider stderr) ──
         private int _currentFileProgress;

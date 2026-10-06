@@ -378,6 +378,7 @@ namespace WhisperSubs.Api
             {
                 isProcessing = queue.IsDraining || queue.IsTaskRunning,
                 currentItem = queue.CurrentItemName,
+                pendingCount = queue.PriorityCount,
                 remaining = queue.IsTaskRunning
                     ? queue.PriorityCount + (queue.TaskTotal - queue.TaskProcessed)
                     : queue.PriorityCount,
@@ -395,6 +396,7 @@ namespace WhisperSubs.Api
                 // Inbound: the items waiting, in the order they'll run (capped; the full total is `remaining`). (v4.0)
                 pending = queue.PendingItems().Select(p => new
                 {
+                    key = p.Key,
                     name = p.Name,
                     tier = p.Tier.ToString(),
                     language = p.Language,
@@ -412,6 +414,37 @@ namespace WhisperSubs.Api
                     current = w.CurrentItems
                 })
             });
+        }
+
+        /// <summary>Cancel one waiting job; a job that already started is left running.</summary>
+        [HttpPost("Queue/CancelPending")]
+        public ActionResult CancelPendingJob([FromQuery] string key)
+        {
+            if (string.IsNullOrWhiteSpace(key) || key.Length > 256)
+                return BadRequest(new { message = "A valid queue key is required." });
+            return CancelWaiting(key);
+        }
+
+        /// <summary>Cancel all waiting jobs, including those beyond the displayed page.</summary>
+        [HttpPost("Queue/ClearPending")]
+        public ActionResult ClearPendingJobs() => CancelWaiting(null);
+
+        private ActionResult CancelWaiting(string? key)
+        {
+            try
+            {
+                var queue = SubtitleQueueService.Instance;
+                var cancelled = queue.CancelPending(key);
+                if (key != null && cancelled == 0)
+                    return Conflict(new { message = "This job is no longer waiting. It may have started or already been cancelled. Refresh the queue." });
+                return Ok(new { cancelled, remaining = queue.PriorityCount,
+                    message = $"Cancelled {cancelled} waiting job(s). Running jobs and existing subtitles were kept." });
+            }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                _logger.LogError(ex, "Could not persist queue cancellation; waiting jobs were kept");
+                return StatusCode(500, new { message = "Could not save the cancellation. Waiting jobs were kept; check server logs." });
+            }
         }
 
         /// <summary>

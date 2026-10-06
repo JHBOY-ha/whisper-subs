@@ -66,8 +66,29 @@
     }
 
     function showToast(message) {
-        try { require(['toast'], function (toast) { toast(message); }); }
-        catch (e) { console.log('[WhisperSubs] ' + message); }
+        // Do not depend on Jellyfin's optional AMD toast module. New web builds may not expose
+        // require(), or may fail its async module load, leaving a successful request invisible.
+        var status = document.getElementById('whisperSubsActionStatus');
+        if (!status) {
+            status = document.createElement('div');
+            status.id = 'whisperSubsActionStatus';
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.style.cssText = 'position:fixed;bottom:2em;left:5%;right:5%;z-index:100000;' +
+                'padding:1em;background:#202020;color:#fff;border:1px solid #52b54b;' +
+                'border-radius:6px;box-shadow:0 2px 12px #000;overflow-wrap:anywhere;';
+            var text = document.createElement('span');
+            text.className = 'whisperSubsActionMessage';
+            status.appendChild(text);
+            var close = document.createElement('button');
+            close.type = 'button';
+            close.textContent = 'Dismiss';
+            close.style.cssText = 'margin-left:1em;cursor:pointer;';
+            close.addEventListener('click', function () { status.remove(); });
+            status.appendChild(close);
+            document.body.appendChild(status);
+        }
+        status.querySelector('.whisperSubsActionMessage').textContent = message;
     }
 
     function closeDialog(el) {
@@ -238,16 +259,18 @@
     function runAction(mode, itemId) {
         if (mode === 'admin') {
             showToast('WhisperSubs: Queuing...');
-            return generateSubtitles(itemId).then(function (response) {
+            return Promise.resolve().then(function () { return generateSubtitles(itemId); }).then(function (response) {
                 var data = typeof response === 'string' ? JSON.parse(response) : response;
-                var count = data && data.queued != null ? data.queued : (data && data.count) || 1;
-                showToast('WhisperSubs: Queued ' + count + ' item(s) for subtitle generation');
-            }).catch(function () {
-                showToast('WhisperSubs: Failed to queue generation');
+                var count = data && data.queued != null ? data.queued : (data && data.count) || 0;
+                showToast('WhisperSubs: ' + (data && data.message || ('Queued ' + count + ' item(s) for subtitle generation')) +
+                    '. View progress in Dashboard > Plugins > WhisperSubs.');
+            }).catch(function (xhr) {
+                showToast('WhisperSubs: Failed to queue generation' +
+                    (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '. Please check the queue before retrying.');
             });
         }
         showToast('WhisperSubs: Requesting...');
-        return requestSubtitles(itemId).then(function (response) {
+        return Promise.resolve().then(function () { return requestSubtitles(itemId); }).then(function (response) {
             var data = typeof response === 'string' ? JSON.parse(response) : response;
             showToast(userRequestResultText(data));
         }).catch(function (xhr) {

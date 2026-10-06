@@ -29,6 +29,9 @@ jobs:
       - name: Parse-check shipped browser JavaScript
         run: node scripts/check-web-js.mjs
 
+      - name: Test queue controls and submission feedback
+        run: node --test scripts/test-queue-ui.mjs
+
   # The documentation site is built and published only by pages.yml, which runs on push and
   # workflow_run, never on a pull request. Build it here too, so a broken page, a missing nav
   # entry or a dependency bump is caught while the PR can still be stopped: pages.yml fails soft

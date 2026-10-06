@@ -300,6 +300,23 @@ The last five sit behind the collapsed **User request limits (anti-abuse)** disc
 
 Priorities are always assigned server-side from who made the request. A client cannot ask for one.
 
+## Cancel waiting jobs
+
+In the generation panel, each waiting job has a **Cancel** button. **Cancel all waiting**
+removes the entire waiting queue, including entries beyond the displayed list. Both ask for
+confirmation and display the result below the progress panel. These controls require an administrator.
+
+Cancellation only affects jobs still waiting when the server handles the request. If a job has
+started in the meantime, it stays running and the page asks you to refresh. Running jobs and
+existing subtitles are kept. The server saves the cancellation before reporting success, so
+cancelled jobs do not return after a restart. This does not disable automatic generation or
+prevent a future sweep or a new manual request from adding jobs again.
+
+On a movie or episode page, generating subtitles displays a persistent message while submitting
+and after success or failure. It works without Jellyfin's toast module. **Dismiss** closes the
+message; progress is shown under **Dashboard → Plugins → WhisperSubs**. A successful submission
+means queued, not that subtitle generation has finished.
+
 ## Settings documented elsewhere
 
 The remaining settings belong to features with their own pages.

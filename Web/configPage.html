@@ -979,6 +979,7 @@
                     <div id="transcriptionWorkers" class="fieldDescription" style="margin:0.4em 0 0; white-space:normal; line-height:1.5;"></div>
                 </div>
                 <style>@keyframes wsQueueSpin{to{transform:rotate(360deg)}}</style>
+                <div id="queueActionStatus" role="status" aria-live="polite" style="margin:0.5em 0;"></div>
 
                 <p>Select a library to browse items and generate subtitles on demand.
                     Manual requests are <strong>queued with priority</strong> and processed before auto-generated items.</p>
@@ -3506,6 +3507,77 @@
                     }
                 },
 
+                _cancellingQueue: false,
+
+                cancelPendingQueue: function (key, count) {
+                    if (WhisperSubsConfig._cancellingQueue) return;
+                    if (!window.confirm(key
+                        ? 'Cancel this waiting job? Running jobs and existing subtitles will be kept.'
+                        : 'Cancel all ' + count + ' waiting jobs? Running jobs and existing subtitles will be kept.')) return;
+                    WhisperSubsConfig._cancellingQueue = true;
+                    var status = document.querySelector('#queueActionStatus');
+                    status.textContent = 'Cancelling waiting jobs...';
+                    var route = key ? 'Queue/CancelPending' : 'Queue/ClearPending';
+                    var url = ApiClient.getUrl('Plugins/WhisperSubs/' + route, key ? { key: key } : {});
+                    return Promise.resolve().then(function () {
+                        return fetch(url, { method: 'POST', headers: WhisperSubsConfig.getAuthHeader() });
+                    }).then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok) throw new Error(data.message || 'HTTP ' + response.status);
+                            return data;
+                        });
+                    }).then(function (data) {
+                        status.textContent = data.message;
+                    }).catch(function (err) {
+                        status.textContent = 'Cancellation not confirmed: ' + WhisperSubsConfig.describeLoadError(err) +
+                            ' Check the refreshed queue before retrying.';
+                    }).finally(function () {
+                        WhisperSubsConfig._cancellingQueue = false;
+                        WhisperSubsConfig.pollQueueStatus();
+                    });
+                },
+
+                renderPendingQueue: function (element, queue) {
+                    if (!element) return;
+                    element.textContent = '';
+                    var pending = Array.isArray(queue.pending) ? queue.pending : [];
+                    var count = queue.pendingCount != null ? queue.pendingCount : pending.length;
+                    if (count === 0) return;
+                    var heading = document.createElement('div');
+                    heading.textContent = 'Waiting (' + count + ') ';
+                    var clear = document.createElement('button');
+                    clear.type = 'button';
+                    clear.className = 'emby-button';
+                    clear.textContent = 'Cancel all waiting';
+                    clear.disabled = WhisperSubsConfig._cancellingQueue;
+                    clear.addEventListener('click', function () { WhisperSubsConfig.cancelPendingQueue(null, count); });
+                    heading.appendChild(clear);
+                    element.appendChild(heading);
+                    pending.forEach(function (job) {
+                        var row = document.createElement('div');
+                        row.style.cssText = 'display:flex;gap:0.5em;align-items:center;margin-top:0.4em;';
+                        var label = document.createElement('span');
+                        label.style.cssText = 'flex:1;min-width:0;overflow-wrap:anywhere;';
+                        label.textContent = (job.name || '') + ' [' + (job.language || 'auto') + ']' +
+                            (job.target ? ' → ' + job.target : '') + (job.tier ? ' [' + job.tier + ']' : '');
+                        row.appendChild(label);
+                        var cancel = document.createElement('button');
+                        cancel.type = 'button';
+                        cancel.className = 'emby-button';
+                        cancel.textContent = 'Cancel';
+                        cancel.setAttribute('aria-label', 'Cancel waiting job: ' + (job.name || ''));
+                        cancel.disabled = !job.key || WhisperSubsConfig._cancellingQueue;
+                        cancel.addEventListener('click', function () { WhisperSubsConfig.cancelPendingQueue(job.key, 1); });
+                        row.appendChild(cancel);
+                        element.appendChild(row);
+                    });
+                    if (count > pending.length) {
+                        var more = document.createElement('div');
+                        more.textContent = '+' + (count - pending.length) + ' more waiting jobs. Cancel all waiting includes these.';
+                        element.appendChild(more);
+                    }
+                },
+
                 pollQueueStatus: function () {
                     var queueUrl = ApiClient.getUrl('Plugins/WhisperSubs/Queue');
                     console.log('WhisperSubs: polling queue status');
@@ -3616,24 +3688,7 @@
                             if (q.failed > 0) parts.push(q.failed + ' failed');
                             stats.textContent = parts.join(' \u00b7 ');
 
-                            // Inbound: the waiting queue (v4.0). Item names are server data, so the
-                            // whole line is assigned via textContent (never innerHTML) \u2014 XSS-safe.
-                            if (pendingEl) {
-                                var pend = Array.isArray(q.pending) ? q.pending : [];
-                                if (pend.length > 0) {
-                                    var pieces = pend.map(function (p) {
-                                        return (p.name || '') + (p.target ? ' \u2192 ' + p.target : '') + (p.tier ? ' [' + p.tier + ']' : '');
-                                    });
-                                    var waitingTotal = (q.remaining != null) ? q.remaining : pend.length;
-                                    var pendingLine = 'Waiting (' + waitingTotal + '): ' + pieces.join(' \u00b7 ');
-                                    if (q.remaining != null && q.remaining > pend.length) {
-                                        pendingLine += '  (+' + (q.remaining - pend.length) + ' more)';
-                                    }
-                                    pendingEl.textContent = pendingLine;
-                                } else {
-                                    pendingEl.textContent = '';
-                                }
-                            }
+                            WhisperSubsConfig.renderPendingQueue(pendingEl, q);
 
                             // Outbound: what's running where (v4.0). One line per worker; only shown
                             // when a live pool exists, so single-server installs stay clean.
