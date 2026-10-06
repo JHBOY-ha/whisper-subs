@@ -8,7 +8,7 @@ Everything the settings page does, it does over HTTP. This page lists those endp
 
 ## The REST API {#rest-api}
 
-All 46 endpoints live under `/Plugins/WhisperSubs`. Two controllers share that prefix: 41 admin endpoints and 5 user-facing ones.
+All 47 endpoints live under `/Plugins/WhisperSubs`. Two controllers share that prefix: 42 admin endpoints and 5 user-facing ones.
 
 Every admin endpoint needs an administrator token. [Diagnostics](diagnostics.md) covers creating an API key and which header to send. A browser tab sends no credentials, so opening any of these URLs directly returns 401.
 
@@ -37,6 +37,7 @@ The whole controller carries `[Authorize(Policy = "RequiresElevation")]`, so **a
 | GET | `Queue` | The live queue: what is processing, what is left, counts of processed and failed, the last error, the current phase, a per-tier breakdown, how many user requests await approval, the next items in run order, and which worker holds which job. |
 | POST | `Queue/CancelPending` | Cancels one waiting job identified by the required `key` query parameter from `Queue.pending[].key`. Returns `{cancelled, remaining, message}`. 409 if no longer waiting (including jobs that started); 500 if the new queue could not be saved, leaving it unchanged. |
 | POST | `Queue/ClearPending` | Cancels all currently waiting jobs, including those beyond the 200 displayed entries. Keeps running jobs and subtitle files. Returns `{cancelled, remaining, message}`. |
+| POST | `Queue/CancelRunning` | Requests cancellation of one execution using the required `id` from `Queue.running[].id`. 202 means accepted; poll `Queue.running` until it disappears (`cancelling` is true meanwhile). 409 if finished; 500 if persistence failed and the execution was kept. Execution IDs cannot target a later retry of the same item. |
 | POST | `Workers/TestConnection` | `{ok, message}`. Posts a short silent WAV to the worker's transcription route to prove reachability, auth and a working transcribe path. Never touches your library. Takes a worker definition as the JSON body. |
 | POST | `Workers/Reload` | Reconciles the running worker pool with the saved configuration and returns the resulting worker count. A just-added worker joins the current drain without a Jellyfin restart. |
 | POST | `RunTask` | Queues the Generate Subtitles scheduled task immediately. |

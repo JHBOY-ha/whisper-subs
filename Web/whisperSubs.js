@@ -81,6 +81,8 @@
             text.className = 'whisperSubsActionMessage';
             status.appendChild(text);
             var close = document.createElement('button');
+            close.setAttribute('is', 'emby-button');
+            close.className = 'raised emby-button';
             close.type = 'button';
             close.textContent = 'Dismiss';
             close.style.cssText = 'margin-left:1em;cursor:pointer;';

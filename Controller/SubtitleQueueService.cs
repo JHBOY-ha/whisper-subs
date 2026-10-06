@@ -132,6 +132,8 @@ namespace WhisperSubs.Controller
         // concurrent enqueue in the dequeue→reserve window could re-add an identity that is about to run,
         // letting the pool dispatch the SAME (item,language) twice — two workers writing one .srt (v4.0).
         private readonly object _dispatchGate = new();
+        private readonly Dictionary<string, RunningSubtitleJob> _runningJobs = new();
+        private readonly HashSet<string> _cancelledInFlight = new();
 
         // Added to the launch-probe wait before a paused drain retries, so the retry lands just PAST the
         // probe window. Landing exactly on it would race the cache and be served the stale verdict. (#185.)
@@ -398,8 +400,7 @@ namespace WhisperSubs.Controller
                 if (selected.Count == 0) return 0;
                 var pending = snapshot.Where(e => key != null && e.Key != key)
                     .Select(e => ToEntry(e.Value, e.Tier)).ToList();
-                var running = _inFlight.Values.Where(w => w != null)
-                    .Select(w => ToEntry(w!, (int)w!.Tier)).ToList();
+                var running = RestorableInFlight();
                 save(pending, running); // Must propagate failures; never acknowledge a non-durable cancel.
                 foreach (var entry in selected)
                 {
@@ -431,6 +432,62 @@ namespace WhisperSubs.Controller
                 {
                     try { if (File.Exists(temp)) File.Delete(temp); } catch { /* preserve original error */ }
                 }
+            }
+        }
+
+        internal RunningSubtitleJob BeginRunning(SubtitleWorkItem work, CancellationToken parent, bool isQueuedJob = true)
+        {
+            lock (_dispatchGate)
+            {
+                var job = new RunningSubtitleJob(work, parent, isQueuedJob);
+                _runningJobs.Add(job.Id, job);
+                return job;
+            }
+        }
+
+        internal void EndRunning(RunningSubtitleJob job)
+        {
+            lock (_dispatchGate)
+            {
+                if (!_runningJobs.Remove(job.Id)) return;
+            }
+            job.DisposeWhenCallbacksFinish();
+        }
+
+        public IReadOnlyList<(string Id, string Name, string Language, string? Target, bool Cancelling)> RunningItems()
+        {
+            lock (_dispatchGate)
+                return _runningJobs.Values.Select(j =>
+                    (j.Id, j.Work.Item.Name, j.Work.Language, j.Work.Target, j.UserCancelled)).ToList();
+        }
+
+        // Caller holds _dispatchGate. Cancelled leases remain reserved until their process exits, but
+        // are omitted from EVERY saved snapshot so an unrelated enqueue cannot resurrect them.
+        private List<QueueEntry> RestorableInFlight(string? excludingKey = null)
+            => _inFlight.Where(p => p.Value != null && p.Key != excludingKey && !_cancelledInFlight.Contains(p.Key))
+                .Select(p => ToEntry(p.Value!, (int)p.Value!.Tier)).ToList();
+
+        public bool CancelRunning(string id) => CancelRunning(id, SaveCancellation);
+
+        internal bool CancelRunning(string id, System.Action<List<QueueEntry>, List<QueueEntry>> save)
+        {
+            lock (_dispatchGate)
+            {
+                if (!_runningJobs.TryGetValue(id, out var job)) return false;
+                if (job.UserCancelled) return true; // idempotent while cancellation is in progress
+                var key = IdentityKey(job.Work);
+                // A completed/retried manual execution can still be finishing its finally block. Do not
+                // let its old button target another execution that has since reserved the same identity.
+                if (job.IsQueuedJob && (!_inFlight.TryGetValue(key, out var held) || !ReferenceEquals(held, job.Work)))
+                    return false;
+                save(_lanes.Snapshot().Select(e => ToEntry(e.Value, e.Tier)).ToList(),
+                    RestorableInFlight(job.IsQueuedJob ? key : null));
+                if (job.IsQueuedJob) _cancelledInFlight.Add(key);
+                job.UserCancelled = true;
+                // CancelAsync sets the token immediately and invokes callbacks asynchronously, avoiding
+                // a callback deadlock against _dispatchGate. Keep the reservation until the task unwinds.
+                job.CancellationCallbacks = job.Cancellation.CancelAsync();
+                return true;
             }
         }
 
@@ -546,7 +603,14 @@ namespace WhisperSubs.Controller
         internal bool TryReserve(string key) => TryReserve(key, null);
 
         // Release after processing (or on failure/cancel) so the same work can be requested again later.
-        internal void Release(string key) => _inFlight.TryRemove(key, out _);
+        internal void Release(string key)
+        {
+            lock (_dispatchGate)
+            {
+                _inFlight.TryRemove(key, out _);
+                _cancelledInFlight.Remove(key);
+            }
+        }
 
         /// <summary>
         /// Pure retry decision (whisper-subs-1t0): an item that has already been retried
@@ -592,7 +656,7 @@ namespace WhisperSubs.Controller
             var key = IdentityKey(wi);
             lock (_dispatchGate)
             {
-                var requeue = ShouldRetry(wi.RetryCount, maxRetries);
+                var requeue = !_cancelledInFlight.Contains(key) && ShouldRetry(wi.RetryCount, maxRetries);
                 Release(key);
                 if (requeue)
                 {
@@ -626,6 +690,12 @@ namespace WhisperSubs.Controller
             var key = IdentityKey(wi);
             lock (_dispatchGate)
             {
+                if (_cancelledInFlight.Contains(key))
+                {
+                    Release(key);
+                    PersistQueue();
+                    return;
+                }
                 Release(key);
                 _lanes.Enqueue(key, (int)wi.Tier, new SubtitleWorkItem
                 {
@@ -992,10 +1062,7 @@ namespace WhisperSubs.Controller
                 // tier comes from the lane (authoritative for position); in-flight tier from the work item.
                 var pending = _lanes.Snapshot().Select(e => ToEntry(e.Value, e.Tier)).ToList();
 
-                var inFlight = _inFlight.Values
-                    .Where(w => w != null)
-                    .Select(w => ToEntry(w!, (int)w!.Tier))
-                    .ToList();
+                var inFlight = RestorableInFlight();
 
                 var json = SerializeQueueFile(pending, inFlight);
                 lock (_fileLock)
@@ -1287,6 +1354,7 @@ namespace WhisperSubs.Controller
                     var probeLabel = $"{label} (language check)";
                     if (probeLease is { } heldProbe) pool.SetCurrent(heldProbe.Key, probeLabel);
                     var probeReleased = 0;
+                    var execution = BeginRunning(wi, cancellationToken);
                     void ReleaseProbe()
                     {
                         if (probeLease is { } p && Interlocked.Exchange(ref probeReleased, 1) == 0) pool.Release(p.Key, probeLabel);
@@ -1297,6 +1365,7 @@ namespace WhisperSubs.Controller
                         var key = IdentityKey(wi);
                         try
                         {
+                            execution.Token.ThrowIfCancellationRequested();
                             if (wi.Target != null)
                             {
                                 // A translate job: only the translation pass, for its one target, on a worker
@@ -1305,19 +1374,28 @@ namespace WhisperSubs.Controller
                                 await manager.TranslateSubtitleAsync(
                                     wi.Item, probeProvider, wi.Target, wi.Force,
                                     new PoolTargetEngines(pool, l, localWhisperTranslates: localWhisperTranslates, beforeTargetEngine: ReleaseProbe),
-                                    cancellationToken);
+                                    execution.Token);
                             }
                             else
                             {
                                 await manager.GenerateSubtitleAsync(
-                                    wi.Item, l.Worker.Provider, wi.Language, cancellationToken, wi.Force,
+                                    wi.Item, l.Worker.Provider, wi.Language, execution.Token, wi.Force,
                                     new PoolTargetEngines(pool, l));
                             }
+                            // Engines can return a partial subtitle on cancellation. Keep that output,
+                            // but still treat this execution as cancelled instead of complete/retryable.
+                            execution.Token.ThrowIfCancellationRequested();
                             if (countProcessed) Interlocked.Increment(ref _processedCount);
                             wi.Completion?.TrySetResult(true);
                             // Completed — release the in-flight lease and persist so a crash can't restore
                             // a finished item as pending. (whisper-subs-1t0.)
                             ReleaseInFlightAndPersist(key);
+                        }
+                        catch (System.Exception) when (execution.UserCancelled)
+                        {
+                            wi.Completion?.TrySetCanceled();
+                            ReleaseInFlightAndPersist(key);
+                            logger.LogInformation("[Dispatch] Cancelled {ItemName} by administrator; not retrying", wi.Item.Name);
                         }
                         catch (System.OperationCanceledException)
                         {
@@ -1403,6 +1481,7 @@ namespace WhisperSubs.Controller
                         }
                         finally
                         {
+                            EndRunning(execution);
                             // Only the worker SLOT is freed here (always). The in-flight (item,language)
                             // reservation is released along the success/retry/drop paths above — NOT here —
                             // so a re-queued item that was already re-dequeued+reserved by another slot is

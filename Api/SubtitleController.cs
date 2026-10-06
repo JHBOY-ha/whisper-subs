@@ -379,6 +379,10 @@ namespace WhisperSubs.Api
                 isProcessing = queue.IsDraining || queue.IsTaskRunning,
                 currentItem = queue.CurrentItemName,
                 pendingCount = queue.PriorityCount,
+                running = queue.RunningItems().Select(j => new
+                {
+                    id = j.Id, name = j.Name, language = j.Language, target = j.Target, cancelling = j.Cancelling
+                }),
                 remaining = queue.IsTaskRunning
                     ? queue.PriorityCount + (queue.TaskTotal - queue.TaskProcessed)
                     : queue.PriorityCount,
@@ -428,6 +432,25 @@ namespace WhisperSubs.Api
         /// <summary>Cancel all waiting jobs, including those beyond the displayed page.</summary>
         [HttpPost("Queue/ClearPending")]
         public ActionResult ClearPendingJobs() => CancelWaiting(null);
+
+        /// <summary>Cancel this execution only, without stopping Jellyfin or cancelling other jobs.</summary>
+        [HttpPost("Queue/CancelRunning")]
+        public ActionResult CancelRunningJob([FromQuery] string id)
+        {
+            if (!Guid.TryParseExact(id, "N", out _))
+                return BadRequest(new { message = "A valid running execution ID is required." });
+            try
+            {
+                if (!SubtitleQueueService.Instance.CancelRunning(id))
+                    return Conflict(new { message = "This execution has already finished. Refresh the queue." });
+                return Accepted(new { message = "Cancellation requested. Waiting for this job to stop; existing subtitle files are kept." });
+            }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                _logger.LogError(ex, "Could not persist running job cancellation; the job was kept");
+                return StatusCode(500, new { message = "Could not save cancellation. The job is still running; check server logs." });
+            }
+        }
 
         private ActionResult CancelWaiting(string? key)
         {

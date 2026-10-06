@@ -975,10 +975,16 @@
                         <div id="transcriptionCurrentItem" class="fieldDescription" style="margin:0; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></div>
                         <div id="transcriptionStats" class="fieldDescription" style="margin:0; white-space:nowrap; text-align:right;"></div>
                     </div>
+                    <div id="transcriptionRunning" class="fieldDescription" style="margin:0.6em 0 0; white-space:normal;"></div>
                     <div id="transcriptionPending" class="fieldDescription" style="margin:0.6em 0 0; white-space:normal;"></div>
                     <div id="transcriptionWorkers" class="fieldDescription" style="margin:0.4em 0 0; white-space:normal; line-height:1.5;"></div>
                 </div>
                 <style>@keyframes wsQueueSpin{to{transform:rotate(360deg)}}</style>
+                <style>
+                    .ws-queue-action { border:0; min-height:2.4em; padding:0.5em 0.85em; margin:0.15em 0; flex-shrink:0; }
+                    .ws-queue-action:disabled { opacity:0.55; cursor:default; }
+                    .ws-queue-action:focus { background:var(--jf-palette-primary-dark, #00648a); color:var(--jf-palette-primary-contrastText, #fff); }
+                </style>
                 <div id="queueActionStatus" role="status" aria-live="polite" style="margin:0.5em 0;"></div>
 
                 <p>Select a library to browse items and generate subtitles on demand.
@@ -3508,17 +3514,27 @@
                 },
 
                 _cancellingQueue: false,
+                _awaitingCancellation: null,
 
                 cancelPendingQueue: function (key, count) {
+                    return WhisperSubsConfig.submitQueueCancellation(
+                        key ? 'Queue/CancelPending' : 'Queue/ClearPending', key ? { key: key } : {}, key
+                            ? 'Cancel this waiting job? Running jobs and existing subtitles will be kept.'
+                            : 'Cancel all ' + count + ' waiting jobs? Running jobs and existing subtitles will be kept.');
+                },
+
+                cancelRunningQueue: function (id) {
+                    return WhisperSubsConfig.submitQueueCancellation('Queue/CancelRunning', { id: id },
+                        'Stop this running job? Existing subtitles and partial output will be kept. Other jobs will continue.');
+                },
+
+                submitQueueCancellation: function (route, parameters, question) {
                     if (WhisperSubsConfig._cancellingQueue) return;
-                    if (!window.confirm(key
-                        ? 'Cancel this waiting job? Running jobs and existing subtitles will be kept.'
-                        : 'Cancel all ' + count + ' waiting jobs? Running jobs and existing subtitles will be kept.')) return;
+                    if (!window.confirm(question)) return;
                     WhisperSubsConfig._cancellingQueue = true;
                     var status = document.querySelector('#queueActionStatus');
-                    status.textContent = 'Cancelling waiting jobs...';
-                    var route = key ? 'Queue/CancelPending' : 'Queue/ClearPending';
-                    var url = ApiClient.getUrl('Plugins/WhisperSubs/' + route, key ? { key: key } : {});
+                    status.textContent = 'Submitting cancellation...';
+                    var url = ApiClient.getUrl('Plugins/WhisperSubs/' + route, parameters);
                     return Promise.resolve().then(function () {
                         return fetch(url, { method: 'POST', headers: WhisperSubsConfig.getAuthHeader() });
                     }).then(function (response) {
@@ -3528,12 +3544,53 @@
                         });
                     }).then(function (data) {
                         status.textContent = data.message;
+                        WhisperSubsConfig._awaitingCancellation = route === 'Queue/CancelRunning' ? parameters.id : null;
                     }).catch(function (err) {
                         status.textContent = 'Cancellation not confirmed: ' + WhisperSubsConfig.describeLoadError(err) +
                             ' Check the refreshed queue before retrying.';
                     }).finally(function () {
                         WhisperSubsConfig._cancellingQueue = false;
                         WhisperSubsConfig.pollQueueStatus();
+                    });
+                },
+
+                queueActionButton: function (text) {
+                    var button = document.createElement('button');
+                    button.setAttribute('is', 'emby-button');
+                    button.type = 'button';
+                    // raised supplies BOTH background and foreground from the active Jellyfin theme.
+                    button.className = 'raised emby-button ws-queue-action';
+                    button.textContent = text;
+                    return button;
+                },
+
+                renderRunningQueue: function (element, queue) {
+                    if (!element) return;
+                    element.textContent = '';
+                    var running = Array.isArray(queue.running) ? queue.running : [];
+                    var waitingFor = WhisperSubsConfig._awaitingCancellation;
+                    if (waitingFor && Array.isArray(queue.running) && !running.some(function (j) { return j.id === waitingFor; })) {
+                        document.querySelector('#queueActionStatus').textContent = 'The selected job is no longer running. Existing subtitles were kept.';
+                        WhisperSubsConfig._awaitingCancellation = null;
+                    }
+                    if (!running.length) return;
+                    var heading = document.createElement('div');
+                    heading.textContent = 'Processing (' + running.length + ')';
+                    element.appendChild(heading);
+                    running.forEach(function (job) {
+                        var row = document.createElement('div');
+                        row.style.cssText = 'display:flex;gap:0.5em;align-items:center;margin-top:0.4em;';
+                        var label = document.createElement('span');
+                        label.style.cssText = 'flex:1;min-width:0;overflow-wrap:anywhere;';
+                        label.textContent = (job.name || '') + ' [' + (job.language || 'auto') + ']' +
+                            (job.target ? ' → ' + job.target : '');
+                        row.appendChild(label);
+                        var cancel = WhisperSubsConfig.queueActionButton(job.cancelling ? 'Cancelling…' : 'Cancel running');
+                        cancel.disabled = !job.id || job.cancelling || WhisperSubsConfig._cancellingQueue;
+                        cancel.setAttribute('aria-label', 'Cancel running job: ' + (job.name || ''));
+                        cancel.addEventListener('click', function () { WhisperSubsConfig.cancelRunningQueue(job.id); });
+                        row.appendChild(cancel);
+                        element.appendChild(row);
                     });
                 },
 
@@ -3545,10 +3602,7 @@
                     if (count === 0) return;
                     var heading = document.createElement('div');
                     heading.textContent = 'Waiting (' + count + ') ';
-                    var clear = document.createElement('button');
-                    clear.type = 'button';
-                    clear.className = 'emby-button';
-                    clear.textContent = 'Cancel all waiting';
+                    var clear = WhisperSubsConfig.queueActionButton('Cancel all waiting');
                     clear.disabled = WhisperSubsConfig._cancellingQueue;
                     clear.addEventListener('click', function () { WhisperSubsConfig.cancelPendingQueue(null, count); });
                     heading.appendChild(clear);
@@ -3561,10 +3615,7 @@
                         label.textContent = (job.name || '') + ' [' + (job.language || 'auto') + ']' +
                             (job.target ? ' → ' + job.target : '') + (job.tier ? ' [' + job.tier + ']' : '');
                         row.appendChild(label);
-                        var cancel = document.createElement('button');
-                        cancel.type = 'button';
-                        cancel.className = 'emby-button';
-                        cancel.textContent = 'Cancel';
+                        var cancel = WhisperSubsConfig.queueActionButton('Cancel');
                         cancel.setAttribute('aria-label', 'Cancel waiting job: ' + (job.name || ''));
                         cancel.disabled = !job.key || WhisperSubsConfig._cancellingQueue;
                         cancel.addEventListener('click', function () { WhisperSubsConfig.cancelPendingQueue(job.key, 1); });
@@ -3596,6 +3647,7 @@
                             var spinner = document.querySelector('#transcriptionSpinner');
                             var pendingEl = document.querySelector('#transcriptionPending');
                             var workersEl = document.querySelector('#transcriptionWorkers');
+                            WhisperSubsConfig.renderRunningQueue(document.querySelector('#transcriptionRunning'), q);
 
                             // ── Idle: hide or show "Finished" briefly ──
                             if (!q.isProcessing && q.remaining === 0) {

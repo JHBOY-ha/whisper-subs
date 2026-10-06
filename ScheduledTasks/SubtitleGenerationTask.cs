@@ -605,18 +605,29 @@ namespace WhisperSubs.ScheduledTasks
             // released. Counters/reports use Interlocked because N of these complete concurrently.
             async Task RunSweptItemAsync(BaseItem item, WorkerLease lease, PlaybackHold playbackHold)
             {
+                var execution = queue.BeginRunning(new SubtitleWorkItem
+                {
+                    Item = item, Language = language, Tier = PriorityTier.Background
+                }, cancellationToken, isQueuedJob: false);
                 try
                 {
+                    execution.Token.ThrowIfCancellationRequested();
                     if (config.PauseOnPlayback)
                     {
-                        await TranscribeWithPlaybackMonitorAsync(manager, item, lease.Worker.Provider, new PoolTargetEngines(pool, lease, skipUnservedTargets: true), language, cancellationToken,
+                        await TranscribeWithPlaybackMonitorAsync(manager, item, lease.Worker.Provider, new PoolTargetEngines(pool, lease, skipUnservedTargets: true), language, execution.Token,
                             isLocalWorker: lease.Worker.Capabilities.IsLocal, hold: playbackHold);
                     }
                     else
                     {
-                        await manager.GenerateSubtitleAsync(item, lease.Worker.Provider, language, cancellationToken,
+                        await manager.GenerateSubtitleAsync(item, lease.Worker.Provider, language, execution.Token,
                             targetEngines: new PoolTargetEngines(pool, lease, skipUnservedTargets: true));
                     }
+                    execution.Token.ThrowIfCancellationRequested();
+                    CountSweptItem();
+                }
+                catch (Exception) when (execution.UserCancelled)
+                {
+                    _logger.LogInformation("Cancelled {ItemName} by administrator; continuing the sweep", item.Name);
                     CountSweptItem();
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -635,6 +646,7 @@ namespace WhisperSubs.ScheduledTasks
                 }
                 finally
                 {
+                    queue.EndRunning(execution);
                     pool.Release(lease.Key, item.Name);
                 }
             }

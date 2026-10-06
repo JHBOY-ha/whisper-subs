@@ -118,3 +118,32 @@ test('clear-all uses its explicit route, suppresses double submission', async ()
     finish({ ok: true, json: () => Promise.resolve({ message: 'Cancelled 205' }) }); await first;
     assert.equal(config._cancellingQueue, false);
 });
+
+test('running cancellation sends execution ID and shows accepted status', async () => {
+    const env = environment(); const config = panel(env); let requested;
+    env.fetch = url => { requested = url; return Promise.resolve({ ok: true, json: () => Promise.resolve({ message: 'Cancellation requested' }) }); };
+    await config.cancelRunningQueue('execution-one');
+    assert.match(requested, /Queue\/CancelRunning/);
+    assert.equal(new URLSearchParams(requested.split('?')[1]).get('id'), 'execution-one');
+    assert.equal(env.document.getElementById('queueActionStatus').textContent, 'Cancellation requested');
+    assert.equal(env.refreshed, true);
+    config.renderRunningQueue(new Element('div'), { running: [] });
+    assert.match(env.document.getElementById('queueActionStatus').textContent, /no longer running/);
+    assert.equal(config._awaitingCancellation, null);
+});
+
+test('running controls show cancelling state, use Jellyfin theme classes and disappear when finished', () => {
+    const env = environment(); const config = panel(env); const root = new Element('div');
+    config.renderRunningQueue(root, { running: [{ id: 'one', name: 'Synthetic', language: 'ja', cancelling: false }] });
+    let button = root.children[1].children[1];
+    assert.match(button.className, /raised/); assert.match(button.className, /emby-button/);
+    assert.equal(button.attrs.is, 'emby-button'); assert.equal(button.disabled, false);
+    config.renderRunningQueue(root, { running: [{ id: 'one', name: 'Synthetic', cancelling: true }] });
+    button = root.children[1].children[1];
+    assert.equal(button.disabled, true); assert.equal(button.textContent, 'Cancelling…');
+    config.renderRunningQueue(root, { running: [] }); assert.equal(root.children.length, 0);
+    config.renderPendingQueue(root, { pendingCount: 1, pending: [{ key: 'one', name: 'Synthetic' }] });
+    for (const button of [root.children[0].children[0], root.children[1].children[1]]) {
+        assert.match(button.className, /raised/); assert.equal(button.attrs.is, 'emby-button');
+    }
+});

@@ -300,17 +300,29 @@ The last five sit behind the collapsed **User request limits (anti-abuse)** disc
 
 Priorities are always assigned server-side from who made the request. A client cannot ask for one.
 
-## Cancel waiting jobs
+## Cancel queued and running jobs
 
 In the generation panel, each waiting job has a **Cancel** button. **Cancel all waiting**
 removes the entire waiting queue, including entries beyond the displayed list. Both ask for
 confirmation and display the result below the progress panel. These controls require an administrator.
 
-Cancellation only affects jobs still waiting when the server handles the request. If a job has
-started in the meantime, it stays running and the page asks you to refresh. Running jobs and
-existing subtitles are kept. The server saves the cancellation before reporting success, so
-cancelled jobs do not return after a restart. This does not disable automatic generation or
-prevent a future sweep or a new manual request from adding jobs again.
+The waiting controls only affect jobs still waiting when the server handles the request. If a
+job has started in the meantime, it stays running and the page asks you to refresh.
+
+Each job under **Processing** has **Cancel running**. Confirming requests cancellation of that
+execution only, including a job started by the scheduled sweep. The button changes to
+**Cancelling…** until the task exits and releases its worker slot. The cancellation signal reaches
+audio extraction and the transcription engine; other jobs continue. Existing subtitles and any
+partial output are kept. For a remote worker, cancellation aborts the local request; stopping
+computation on the remote server depends on that provider.
+
+The server saves the cancellation before reporting acceptance. A manually cancelled execution
+is not automatically retried or restored after a restart; an unrelated service shutdown still
+uses the normal retry/resume policy. This does not disable automatic generation or prevent a
+future sweep or a new manual request from adding jobs again.
+
+Cancel buttons use Jellyfin's theme colors, with a contrasting focus state and a disabled state
+while cancellation is in progress.
 
 On a movie or episode page, generating subtitles displays a persistent message while submitting
 and after success or failure. It works without Jellyfin's toast module. **Dismiss** closes the
